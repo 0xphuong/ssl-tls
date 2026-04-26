@@ -1,0 +1,20 @@
+name: Bug Report
+description: Report an error in the guide or script
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error Output
+      render: shell
+  - type: input
+    id: os
+    attributes:
+      label: OS / OpenSSL version
+      placeholder: "macOS 14 / OpenSSL 3.2"

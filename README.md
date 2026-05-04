@@ -21,9 +21,9 @@ You will be prompted to fill in:
 | Country Name | `VN` |
 | State or Province | `Ho Chi Minh` |
 | Locality | `Ho Chi Minh` |
-| Organization Name | `7-Eleven Vietnam Co., Ltd` |
-| Organizational Unit | `IT` |
-| Common Name | `sevensystem.vn` or `*.7-eleven.vn` |
+| Organization Name | `SEVEN SYSTEM VIET NAM JOINT STOCK COMPANY` |
+| Organizational Unit | `7Lab` |
+| Common Name | `*.7-eleven.vn` |
 | Email | _(leave blank)_ |
 
 > **Keep `private.key` secret. Never commit it to git.**
@@ -81,24 +81,49 @@ cat _7-eleven_vn.crt \
 > **Rule**: domain cert → intermediate CA(s) → root CA  
 > `AAA_Certificate_Services.crt` is the legacy root — usually not needed, skip unless required.
 
+### Check newline between certificates
+
+After concatenating, verify each certificate boundary has a newline separator. A missing newline will cause Nginx/Kubernetes to reject the bundle.
+
+```bash
+grep -c "BEGIN CERTIFICATE" 7-eleven-vn-tls.crt   # should match number of certs concatenated
+```
+
+The boundary between two certificates must look like this:
+
+```
+...base64data...
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+...base64data...
+```
+
+If they appear on the same line (`-----END CERTIFICATE----------BEGIN CERTIFICATE-----`), fix with:
+
+```bash
+# Add newline between certs if missing
+awk '/-----END CERTIFICATE-----/{print; print ""; next}1' 7-eleven-vn-tls.crt > fixed.crt
+mv fixed.crt 7-eleven-vn-tls.crt
+```
+
 ---
 
 ## Step 4 — Verify the certificate chain
 
 ```bash
 # Check cert details
-openssl x509 -in sevensystem-vn-tls.crt -text -noout | grep -E "Subject:|Issuer:|Not Before:|Not After:"
+openssl x509 -in 7-eleven-vn-tls.crt -text -noout | grep -E "Subject:|Issuer:|Not Before:|Not After:"
 
 # Verify chain is complete (should output: OK)
-openssl verify -CAfile sevensystem-vn-tls.crt sevensystem-vn-tls.crt
+openssl verify -CAfile 7-eleven-vn-tls.crt 7-eleven-vn-tls.crt
 
 # Verify private key matches the certificate
-openssl x509 -noout -modulus -in sevensystem-vn-tls.crt | md5
-openssl rsa  -noout -modulus -in private.key             | md5
+openssl x509 -noout -modulus -in 7-eleven-vn-tls.crt | md5
+openssl rsa  -noout -modulus -in private.key          | md5
 # Both md5 values must be identical
 
 # Test live TLS handshake (after deploying)
-echo | openssl s_client -connect sevensystem.vn:443 -servername sevensystem.vn 2>/dev/null | openssl x509 -noout -dates
+echo | openssl s_client -connect 7-eleven.vn:443 -servername 7-eleven.vn 2>/dev/null | openssl x509 -noout -dates
 ```
 
 ---
@@ -154,6 +179,70 @@ kubectl create secret tls sevensystem-vn-tls \
 
 ---
 
+## Step 6 — Configure Nginx
+
+### Option A — Single bundle file (recommended)
+
+Copy files to server:
+```bash
+sudo mkdir -p /etc/nginx/ssl/7-eleven-vn
+sudo cp private.key          /etc/nginx/ssl/7-eleven-vn/private.key
+sudo cp 7-eleven-vn-tls.crt  /etc/nginx/ssl/7-eleven-vn/ssl-bundle.crt
+sudo chmod 600 /etc/nginx/ssl/7-eleven-vn/private.key
+```
+
+Nginx config:
+```nginx
+server {
+    listen 443 ssl;
+    server_name *.7-eleven.vn;
+
+    ssl_certificate     /etc/nginx/ssl/7-eleven-vn/ssl-bundle.crt;
+    ssl_certificate_key /etc/nginx/ssl/7-eleven-vn/private.key;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+}
+```
+
+### Option B — Separate intermediate files
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name *.7-eleven.vn;
+
+    ssl_certificate     /etc/nginx/ssl/7-eleven-vn/STAR_7-eleven_vn.crt;
+    ssl_certificate_key /etc/nginx/ssl/7-eleven-vn/private.key;
+
+    # Sectigo chain (Case 1)
+    ssl_trusted_certificate /etc/nginx/ssl/7-eleven-vn/Sectigo_RSA_Domain_Validation_Secure_Server_CA.crt;
+    # ssl_trusted_certificate /etc/nginx/ssl/7-eleven-vn/USERTrust_RSA_Certification_Authority.crt;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers   HIGH:!aNULL:!MD5;
+}
+```
+
+> **Note**: `ssl_trusted_certificate` is used for OCSP stapling — only one file allowed in Nginx.  
+> For full chain validation use Option A (bundle) instead.
+
+### Test and reload
+
+```bash
+# Test config syntax
+sudo nginx -t
+
+# Reload without downtime
+sudo nginx -s reload
+
+# Verify SSL from command line
+echo | openssl s_client -connect 7-eleven.vn:443 -servername 7-eleven.vn 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+```
+
+---
+
 ## Helper script
 
 Use [`bundle-cert.sh`](./bundle-cert.sh) to assemble and verify the chain in one command:
@@ -178,6 +267,8 @@ Use [`bundle-cert.sh`](./bundle-cert.sh) to assemble and verify the chain in one
 - [ ] Generate new `private.key` and `certreq.csr` (or reuse existing key)
 - [ ] Submit CSR to CA, complete domain validation
 - [ ] Download and assemble new `.crt` chain
-- [ ] Verify modulus matches between `.crt` and `.key`
-- [ ] Update Kubernetes secret (`--dry-run=client | kubectl apply`)
+- [ ] Check newline between `-----END CERTIFICATE-----` and `-----BEGIN CERTIFICATE-----`
+- [ ] Verify modulus matches: `openssl x509 -noout -modulus -in <cert.crt> | md5` vs `openssl rsa -noout -modulus -in private.key | md5`
 - [ ] Confirm new expiry: `openssl x509 -noout -dates -in <cert.crt>`
+- [ ] Copy files to `/etc/nginx/ssl/` and reload Nginx: `sudo nginx -t && sudo nginx -s reload`
+- [ ] Update Kubernetes secret (`--dry-run=client | kubectl apply`)

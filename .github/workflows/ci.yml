@@ -13,11 +13,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check bundle-cert.sh is executable
-        run: test -x bundle-cert.sh
+      - name: Check scripts are executable
+        run: |
+          test -x bundle-cert.sh
+          test -x check-cert.sh
 
       - name: Lint with shellcheck
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: '.'
-          additional_files: 'bundle-cert.sh'
+          additional_files: 'bundle-cert.sh check-cert.sh'
+
+      - name: Smoke test — help and version exit cleanly
+        run: |
+          ./bundle-cert.sh --help
+          ./check-cert.sh --help
+          ./check-cert.sh --version
+
+      - name: Smoke test — a broken chain is rejected
+        run: |
+          set -e
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /tmp/k.pem -out /tmp/leaf.pem -subj '/CN=example.test' >/dev/null 2>&1
+          # A lone self-signed cert has no intermediate: the gate must exit non-zero.
+          if ./check-cert.sh -c /tmp/leaf.pem -k /tmp/k.pem --no-handshake -q; then
+            echo "check-cert.sh accepted a chain it should have rejected"; exit 1
+          fi
+          echo "rejected as expected"
